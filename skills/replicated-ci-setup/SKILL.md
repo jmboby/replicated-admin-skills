@@ -119,6 +119,7 @@ replicated release create \
 ```bash
 replicated customer create \
   --name "test-customer" \
+  --email "test@example.com" \
   --channel "${CHANNEL}" \
   --expires-in 24h \
   --kots-install=false \
@@ -127,7 +128,9 @@ replicated customer create \
   --output json
 ```
 
-**Critical:** `--kots-install=false` for Helm-only releases, otherwise you get: `Cannot assign customer with KOTS install enabled to a channel with a helm-cli-only release`
+**Critical:**
+- `--kots-install=false` for Helm-only releases, otherwise: `Cannot assign customer with KOTS install enabled to a channel with a helm-cli-only release`
+- `--email` is **required** when `--helm-install` is set, otherwise: `email is required for customers with helm install enabled`
 
 ### Create Cluster
 
@@ -198,5 +201,6 @@ lint-and-test → build-and-push → create-release (Unstable) → test-on-cmx �
 | Using `replicated-actions` | Switch to `replicated` CLI for EC support |
 | Channel slugs with uppercase | Use lowercase (`stable` not `Stable`) |
 | Customer with KOTS enabled on Helm-only channel | Add `--kots-install=false --helm-install` |
+| Missing `--email` with `--helm-install` | Add `--email` — required for Helm-install customers |
 | `channel delete` with channel name | Use `channel rm` with channel **ID** |
 | Missing `kots/cluster/*/kubeconfig` RBAC | Add it — separate from `kots/cluster/*` |
