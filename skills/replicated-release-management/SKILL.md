@@ -100,6 +100,8 @@ frontend:
     tag: "1.0.0" # x-release-please-version
 ```
 
+**Warning:** `x-release-please-version` annotations change the annotated value to a semver string (e.g., `"1.2.3"`). If your release workflow uses `sed` to substitute `"latest"` tags in values files (e.g., `sed 's/"latest"/"${VERSION}"/g'`), those patterns will break because the values have already been replaced by release-please. Update your `sed` patterns to match the semver format, or restructure to avoid `sed`-based substitution entirely.
+
 ### Version bumping rules
 
 | Commit prefix | Version bump | Example |
@@ -155,6 +157,51 @@ replicated release create \
     files: my-chart-${VERSION}.tgz
 ```
 
+## GITHUB_TOKEN Limitation
+
+Tags created by `GITHUB_TOKEN` (including release-please's tags) do **not** trigger other GitHub Actions workflows. This is a security restriction: automated tokens can't create a chain of workflow triggers.
+
+**Problem:** Your release-please workflow creates a `v1.2.3` tag, but your Replicated Release workflow (`on: push: tags: ["v*.*.*"]`) never fires.
+
+**Solution:** Use `workflow_call` to chain the workflows directly from release-please:
+
+```yaml
+# .github/workflows/release-please.yaml
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: rp
+        with:
+          release-type: simple
+
+  replicated-release:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
+    uses: ./.github/workflows/replicated-release.yaml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}
+    secrets: inherit
+```
+
+```yaml
+# .github/workflows/replicated-release.yaml
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+  push:
+    tags: ["v*.*.*"]   # keep for manual re-runs via git push
+```
+
+The `workflow_call` trigger bypasses the GITHUB_TOKEN restriction because it's an explicit call, not a tag event.
+
 ## Promote Workflow
 
 Manual dispatch for promoting to Beta/Stable:
@@ -209,3 +256,5 @@ The release workflow substitutes `$VERSION` via `sed` before packaging.
 | Uppercase channel slugs in promote | Use lowercase (`stable`, `beta`, `unstable`) |
 | Chart.yaml version out of sync with images | Add both to release-please `extra-files` with annotations |
 | `$VERSION` not substituted in HelmChart CR | `sed` before packaging the release directory |
+| release-please tag doesn't trigger release workflow | Use `workflow_call` — GITHUB_TOKEN tags don't fire other workflows |
+| `sed 's/"latest"/...'` broken after release-please | release-please replaces `"latest"` with semver; update sed patterns accordingly |

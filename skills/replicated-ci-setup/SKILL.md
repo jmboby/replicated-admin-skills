@@ -147,8 +147,10 @@ replicated cluster create \
 ### Get Kubeconfig
 
 ```bash
-replicated cluster kubeconfig --id "${CLUSTER_ID}" > kubeconfig.yaml
+replicated cluster kubeconfig --id "${CLUSTER_ID}" --output-path kubeconfig.yaml
 ```
+
+**Use `--output-path`**, not stdout redirect (`>`). The CLI prints warnings to stdout that corrupt the YAML if you redirect.
 
 ### Helm Install from Replicated Registry
 
@@ -159,9 +161,13 @@ helm registry login registry.replicated.com \
 
 helm install my-app \
   oci://registry.replicated.com/${APP}/${CHANNEL}/my-chart \
-  --version "${VERSION}" \
+  --version "${CHART_VERSION}" \
   --namespace default
 ```
+
+**`--version` must match the chart version in `Chart.yaml`** (e.g., `1.2.3`), NOT the Replicated release label. If you push a chart with `version: 1.2.3` in `Chart.yaml`, use `--version 1.2.3` even if the Replicated release is labelled `v1.2.3` or `my-release`.
+
+**Never use `--wait` with post-install hooks.** Helm `--wait` waits for all pods to be Ready before running hooks. If any pod depends on a hook-created resource (e.g., a database CR), this deadlocks: hooks never run → pods never ready → `--wait` never returns.
 
 ### Cleanup
 
@@ -185,6 +191,47 @@ lint-and-test → build-and-push → test-on-cmx
                                   └── cleanup (always)
 ```
 
+## workflow_call Pattern for Chaining Workflows
+
+**Problem:** Tags created by `GITHUB_TOKEN` don't trigger other workflows (GitHub security restriction). So release-please's tag won't fire your Replicated Release workflow if both use `push: tags`.
+
+**Solution:** Use `workflow_call` to chain release-please → Replicated Release directly:
+
+```yaml
+# release-please.yaml
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: rp
+        with:
+          release-type: simple
+
+  replicated-release:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
+    uses: ./.github/workflows/replicated-release.yaml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}
+    secrets: inherit
+```
+
+```yaml
+# replicated-release.yaml
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+  push:
+    tags: ["v*.*.*"]   # keep for manual re-runs
+```
+
 ## Release Workflow Pattern
 
 Trigger on tags (`v*.*.*`), not on push to main:
@@ -204,3 +251,7 @@ lint-and-test → build-and-push → create-release (Unstable) → test-on-cmx �
 | Missing `--email` with `--helm-install` | Add `--email` — required for Helm-install customers |
 | `channel delete` with channel name | Use `channel rm` with channel **ID** |
 | Missing `kots/cluster/*/kubeconfig` RBAC | Add it — separate from `kots/cluster/*` |
+| `--wait` with post-install hooks | Remove `--wait` — deadlocks if pods depend on hook-created resources |
+| Kubeconfig stdout redirect (`> kubeconfig.yaml`) | Use `--output-path kubeconfig.yaml` — CLI warnings corrupt redirected output |
+| `helm install --version` uses release label | Use chart version from `Chart.yaml`, not the Replicated release label |
+| release-please tag doesn't trigger release workflow | Use `workflow_call` to chain — `GITHUB_TOKEN` tags don't fire other workflows |

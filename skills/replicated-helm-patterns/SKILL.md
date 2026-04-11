@@ -27,7 +27,7 @@ no matches for kind "Cluster" in version "postgresql.cnpg.io/v1"
 ensure CRDs are installed first
 ```
 
-**Solution:** Make the CR a post-install hook so it's applied after the main release (including CRDs):
+**Solution:** Make the CR a `post-install`-only hook so it's applied after the main release (including CRDs):
 
 ```yaml
 apiVersion: postgresql.cnpg.io/v1
@@ -35,12 +35,16 @@ kind: Cluster
 metadata:
   name: {{ include "myapp.fullname" . }}-db
   annotations:
-    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook": post-install
     "helm.sh/hook-weight": "10"
 spec:
   instances: {{ .Values.postgresql.instances }}
   # ...
 ```
+
+**Critical warnings:**
+- **Never use `post-upgrade`** on Cluster CRs. Adding `post-upgrade` causes Helm to re-create the resource on every upgrade, which can wipe stored data. Use `post-install` only.
+- **Never use `--wait` with post-install hooks.** Helm `--wait` waits for all pods to be Ready before running hooks. If any pod depends on the hook-created resource (e.g., an app pod waiting for the database CR), this deadlocks: `--wait` blocks hooks → hooks never create the DB → pods never ready → `--wait` never returns.
 
 ## Operator Webhook Timing
 
@@ -209,3 +213,5 @@ postgres://{{ .Values.externalDatabase.user }}:$(DB_PASSWORD)@{{ .Values.externa
 | Using `--auto` with `.replicated` config | Don't — `--auto` ignores `.replicated` and defaults to `./manifests` |
 | Hook jobs missing imagePullSecrets | Add the helper — hook pods need pull secrets too |
 | `helm.sh/hook-weight` doesn't wait | Correct — it only orders, doesn't wait. Use a Job to actually wait |
+| `post-install,post-upgrade` on Cluster CRs | Use `post-install` only — `post-upgrade` re-creates the resource, potentially wiping data |
+| `helm install --wait` with post-install hooks | Remove `--wait` — deadlocks when pods depend on hook-created resources |

@@ -40,7 +40,7 @@ replicated:
     repository: library/replicated-sdk-image
 ```
 
-**Naming:** Use `nameOverride` (not `fullnameOverride`) to brand the SDK deployment. The resulting deployment name is `<release-name>-<nameOverride>`.
+**Naming:** Use `nameOverride` (not `fullnameOverride`) to brand the SDK deployment. Unlike most Helm charts, the SDK chart uses `nameOverride` as the **full deployment name** — it does NOT prepend the Helm release name. So `nameOverride: "sdk"` gives deployment `sdk`, not `<release>-sdk`. Set the full desired name including your app prefix (e.g., `nameOverride: "my-app-sdk"`).
 
 **Image proxy:** Override the SDK image registry to use your custom proxy domain.
 
@@ -52,7 +52,7 @@ helm dependency update chart/
 
 ## SDK API Reference
 
-Base URL: `http://<release-name>-<nameOverride>:3000` (in-cluster)
+Base URL: `http://<nameOverride>:3000` (in-cluster, e.g., `http://my-app-sdk:3000`)
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
@@ -82,9 +82,15 @@ func (c *Client) IsFeatureEnabled(fieldName string) bool {
         return false // fail closed
     }
     defer resp.Body.Close()
-    var field struct{ Value string `json:"value"` }
+    var field struct{ Value interface{} `json:"value"` }
     json.NewDecoder(resp.Body).Decode(&field)
-    return field.Value == "true" || field.Value == "1"
+    switch v := field.Value.(type) {
+    case bool:
+        return v
+    case string:
+        return v == "true" || v == "1"
+    }
+    return false
 }
 ```
 
@@ -161,7 +167,7 @@ Empty array = on latest version. Non-empty = update available. Show a dismissibl
 ```go
 func (c *Client) GetLicenseInfo() (*LicenseInfo, error) {
     resp, err := c.httpClient.Get(fmt.Sprintf("%s/api/v1/license/info", c.baseURL))
-    // ... decode LicenseInfo{LicenseID, IsExpired, LicenseType, ExpirationDate}
+    // ... decode — see SDK Response Format Quirks below for correct struct tags
 }
 ```
 
@@ -171,6 +177,69 @@ Required behavior:
 - **Valid** → normal operation
 
 Check on startup + periodic recheck. License can change without app redeployment.
+
+## SDK Response Format Quirks
+
+The SDK API has several undocumented field name and type quirks. **Always verify against the real endpoint** rather than trusting documentation:
+
+```bash
+kubectl exec -n <ns> <api-pod> -- wget -qO- http://<sdk-svc>:3000/api/v1/license/info
+kubectl exec -n <ns> <api-pod> -- wget -qO- http://<sdk-svc>:3000/api/v1/license/fields/<name>
+```
+
+### Boolean fields return JSON booleans, not strings
+
+`/license/fields/<name>` returns `"value": true` (boolean) for Boolean type fields, not `"value": "true"` (string). Use `interface{}` with a type switch:
+
+```go
+var field struct{ Value interface{} `json:"value"` }
+json.NewDecoder(resp.Body).Decode(&field)
+switch v := field.Value.(type) {
+case bool:
+    return v
+case string:
+    return v == "true" || v == "1"
+}
+```
+
+### `licenseID` uses capital D
+
+The `/license/info` endpoint returns `"licenseID"` (capital D), not `"licenseId"`. Go JSON struct tags are case-sensitive:
+
+```go
+// Correct
+type LicenseInfo struct {
+    LicenseID string `json:"licenseID"`
+    // ...
+}
+```
+
+### No `isExpired` field — parse `expires_at` instead
+
+The `/license/info` response has no top-level `isExpired` field. Expiry is nested in `entitlements.expires_at.value` as an RFC3339 date string. You must parse and compare:
+
+```go
+type LicenseInfo struct {
+    LicenseID   string `json:"licenseID"`
+    LicenseType string `json:"licenseType"`
+    Entitlements struct {
+        ExpiresAt struct {
+            Value string `json:"value"`
+        } `json:"expires_at"`
+    } `json:"entitlements"`
+}
+
+func isExpired(info *LicenseInfo) bool {
+    if info.Entitlements.ExpiresAt.Value == "" {
+        return false // no expiry set
+    }
+    t, err := time.Parse(time.RFC3339, info.Entitlements.ExpiresAt.Value)
+    if err != nil {
+        return false
+    }
+    return time.Now().After(t)
+}
+```
 
 ## SDK Unavailability (Local Dev)
 
@@ -190,3 +259,6 @@ Configure SDK URL via env var: `REPLICATED_SDK_URL` (default: `http://<app>-sdk:
 | Only checking license on startup | Check periodically — license can be updated at any time |
 | Using `fullnameOverride` for SDK naming | SDK chart only supports `nameOverride` |
 | Forgetting to proxy SDK image | Override `replicated.image.registry` in values |
+| `LicenseField.Value` typed as `string` | Use `interface{}` with type switch — Boolean fields return JSON booleans |
+| `json:"licenseId"` (lowercase d) | Use `json:"licenseID"` (capital D) — SDK returns capital D |
+| Checking `info.IsExpired` | No such field — parse `entitlements.expires_at.value` as RFC3339 |
