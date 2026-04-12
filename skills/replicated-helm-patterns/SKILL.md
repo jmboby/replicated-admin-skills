@@ -171,37 +171,49 @@ manifests:
 
 For stateful components with embedded default + external opt-in:
 
+**Single toggle:** Use one boolean (`postgresql.enabled`) to control both the operator subchart (via Chart.yaml `condition`) and the Cluster CR. Don't use separate toggles for operator and CR — they always move together and separate toggles cause confusion.
+
 ```yaml
-# values.yaml
+# Chart.yaml — single condition for operator subchart
+dependencies:
+  - name: cloudnative-pg
+    condition: postgresql.enabled
+
+# values.yaml — single toggle, pre-configured external defaults
 postgresql:
-  enabled: true    # Deploy embedded DB
+  enabled: true    # Controls operator subchart AND Cluster CR
 
 externalDatabase:
-  host: ""
+  host: "ep-xxx.us-east-1.aws.neon.tech"  # Pre-configured, not a conflict
   port: 5432
-  name: "myapp"
-  user: "myapp"
-  password: ""
+  name: "mydb"
+  user: "mydb_owner"
+  password: ""       # Pass via --set at install time, NEVER store here
+  sslmode: "require" # Cloud Postgres requires TLS
 ```
 
-```yaml
-# Cluster CR — conditional on embedded mode
-{{- if .Values.postgresql.enabled }}
-apiVersion: postgresql.cnpg.io/v1
-kind: Cluster
-# ...
-{{- end }}
+**Validation guard:** Only guard against genuinely broken states. Having external DB values alongside `postgresql.enabled=true` is pre-configuration, not a conflict:
+
+```gotemplate
+{{- define "myapp.validateDatabase" -}}
+{{- if and (not .Values.postgresql.enabled) (not .Values.externalDatabase.host) -}}
+  {{- fail "postgresql.enabled=false but externalDatabase.host is not set." -}}
+{{- end -}}
+{{- end -}}
 ```
 
-```yaml
-# Database URL helper — switches based on mode
+**Database URL helper:** Use `sslmode` from values (not hardcoded). Cloud providers like Neon require `sslmode=require`. Embedded CNPG uses `sslmode=disable` (cluster-local traffic):
+
+```gotemplate
 {{- define "myapp.databaseURL" -}}
-{{- if .Values.postgresql.enabled }}
-postgres://myapp:$(DB_PASSWORD)@{{ include "myapp.fullname" . }}-db-rw:5432/myapp
-{{- else }}
-postgres://{{ .Values.externalDatabase.user }}:$(DB_PASSWORD)@{{ .Values.externalDatabase.host }}:{{ .Values.externalDatabase.port }}/{{ .Values.externalDatabase.name }}
-{{- end }}
-{{- end }}
+{{- include "myapp.validateDatabase" . -}}
+{{- if .Values.postgresql.enabled -}}
+{{- /* sslmode=disable is correct for cluster-local CNPG traffic */ -}}
+postgres://myapp:$(DB_PASSWORD)@{{ include "myapp.fullname" . }}-db-rw:5432/myapp?sslmode=disable
+{{- else -}}
+postgres://{{ .Values.externalDatabase.user }}:$(DB_PASSWORD)@{{ .Values.externalDatabase.host }}:{{ .Values.externalDatabase.port }}/{{ .Values.externalDatabase.name }}?sslmode={{ .Values.externalDatabase.sslmode | default "require" }}
+{{- end -}}
+{{- end -}}
 ```
 
 ## Common Mistakes

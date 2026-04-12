@@ -1,12 +1,13 @@
 {
   "name": "replicated-admin-skills",
   "version": "0.1.0",
-  "description": "Skills for Replicated platform administration — CI/CD, image proxy, SDK integration, release management, and Helm patterns",
+  "description": "Skills for Replicated platform administration — CI/CD, image proxy, SDK integration, release management, Helm patterns, and troubleshoot specs",
   "skills": [
     "skills/replicated-ci-setup",
     "skills/replicated-image-proxy",
     "skills/replicated-sdk-integration",
     "skills/replicated-release-management",
-    "skills/replicated-helm-patterns"
+    "skills/replicated-helm-patterns",
+    "skills/replicated-troubleshoot"
   ]
 }
