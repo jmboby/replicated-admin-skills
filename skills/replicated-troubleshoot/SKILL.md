@@ -230,3 +230,4 @@ A glob like `myapp/api-logs/*/*` matches every file under that path. If a pod ha
 | Using `<collectorName>/stdout.txt` in preflight | Use `<collectorName>.log` for preflight run collectors |
 | Empty `collectors:` section | Omit entirely when no collectors are active |
 | Broad log glob producing duplicates | Narrow to specific container: `*/api.log` not `*/*` |
+| `http` collector "No matching files" from local CLI | `http` collector runs in-cluster; local `kubectl support-bundle` can't resolve svc.cluster.local DNS. Run from in-cluster or use the `/admin` flow |
