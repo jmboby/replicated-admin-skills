@@ -1,6 +1,6 @@
 ---
 name: replicated-embedded-cluster-v3
-description: Use when packaging or troubleshooting Embedded Cluster v3 releases — custom proxy domains, noProxy=true image templating, NodePort range extension, v1beta3 preflight limitations, airgap bundle image discovery
+description: Use when packaging or troubleshooting Embedded Cluster v3 releases — custom proxy domains, noProxy=true image templating, per-entrypoint Traefik NodePorts, v1beta3 preflight limitations, airgap bundle image discovery, kube-apiserver flag overrides
 ---
 
 # Embedded Cluster v3 Packaging
@@ -87,9 +87,31 @@ replicated api get /v3/app/<app-id>/channel/<chan-id>/releases \
   | jq '.releases[0].airgapBundleImages'
 ```
 
-## Extending kube-apiserver flags on EC v3
+## NodePorts for ingress on EC v3
 
-For things like expanding the NodePort range (so Traefik can bind :80/:443 directly):
+EC's k0s already extends `--service-node-port-range` to `80-32767` by default ([pkg/k0s/config.go L167-169](https://github.com/replicatedhq/ec/blob/0ea20cf0eb442b136a223da13343164cbd873d83/pkg/k0s/config.go#L167-L169)), so NodePort values as low as 80 are accepted out of the box. **No `unsupportedOverrides` needed** for this.
+
+### Traefik v3 NodePort config is per-entrypoint
+
+The Traefik v3 Helm chart's NodePort config lives at `ports.<entrypoint>.nodePort`, NOT at `service.nodePorts.{http,https}`. The latter is a common pattern in other charts but is silently ignored by Traefik v3 — the Service comes up with random NodePorts.
+
+```yaml
+# replicated/traefik-chart.yaml (HelmChart CR values)
+values:
+  service:
+    type: NodePort
+  ports:
+    web:
+      nodePort: 80
+    websecure:
+      nodePort: 443
+```
+
+Verify via `helm show values traefik/traefik --version <ver>` before assuming any specific values path works.
+
+### Extending kube-apiserver flags generally
+
+If you genuinely need a wider range or other kube-apiserver flags beyond what EC provides, you *can* use `unsupportedOverrides.k0s`:
 
 ```yaml
 spec:
@@ -99,12 +121,14 @@ spec:
         spec:
           api:
             extraArgs:
-              service-node-port-range: "80-32767"
+              service-node-port-range: "1-65535"
 ```
 
-**Caveats:**
+**But first check if EC's defaults already cover your need.** Before adding the override, grep the EC repo at the version you're deploying (`replicatedhq/ec @ pkg/k0s/config.go`) for the flag you think you need — it may already be set.
+
+**Caveats of using the override anyway:**
 - Outside Replicated's support SLA (the field name literally says "unsupported")
-- `spec.api` cannot be modified post-install — range is install-time-locked; changing it requires full reinstall
+- `spec.api` can't be modified post-install — any value is install-time-locked; changing it requires full reinstall
 - Prefer narrow ranges (e.g. `80-32767`) over wide-open (`1-65535`) to avoid conflicts with host daemons on ports like 22/53/25
 
 ## Security: avoid `hostNetwork: true` for Traefik
@@ -118,7 +142,7 @@ A common temptation for "just bind to :80/:443" is `hostNetwork: true` on the in
 | Port binding unrestricted | Compromised container can open arbitrary listeners on the node |
 | Reduced isolation | Pods share host's network namespace |
 
-Prefer **NodePort range extension** (above) or **MetalLB + LoadBalancer** for production.
+Prefer **per-entrypoint NodePort config** (above; EC's default range already accepts :80/:443) or **MetalLB + LoadBalancer** for production.
 
 ## v1beta3 preflight limitations (EC v3 today)
 
@@ -137,7 +161,7 @@ In theory v1beta3 supports `.Values` conditionals. In practice EC v3's current r
 | Hardcoded image in a chart template fails on airgap | Move image to a chart value; wrap with `ReplicatedImageName ... true` in HelmChart CR |
 | Cert-job uses `apk add` at runtime | Fails on airgap (no egress); use pre-baked images or split into initContainer pattern |
 | Conditional-template images missing from airgap bundle | Force-render via HelmChart CR `builder:` overrides |
-| Traefik bound to port `:3170` not `:443` | Default NodePort range excludes <30000; add `service-node-port-range` override |
+| Traefik bound to random NodePort despite declaring 443 | Traefik v3 uses `ports.<entrypoint>.nodePort`, NOT `service.nodePorts.{http,https}`; the latter is silently ignored |
 | v1beta3 preflight `function not defined` error | Don't use KOTS template functions in v1beta3; keep cluster-level only |
 
 ## Verification checklist before releasing
