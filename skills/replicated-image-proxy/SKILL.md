@@ -154,6 +154,110 @@ spec:
     {{- include "myapp.imagePullSecrets" . | nindent 8 }}
 ```
 
+## Advanced: `ReplicatedImageName` with `noProxy=true`
+
+An alternative to hardcoding the custom-domain form in every values path is to wrap each image value with `ReplicatedImage*` in the HelmChart CR. This lets Replicated automatically rewrite images for BYO / airgap installs (to the local registry) while keeping the custom domain on online installs.
+
+**Chart defaults stay in custom-domain proxy form** (same as above). The HelmChart CR adds the wrappers with `true` (noProxy) as the 2nd arg to prevent double-prefixing:
+
+```yaml
+# replicated/my-app-chart.yaml
+spec:
+  values:
+    api:
+      image:
+        registry: 'repl{{ ReplicatedImageRegistry (HelmValue ".Values.api.image.registry") true }}'
+        repository: 'repl{{ ReplicatedImageRepository (HelmValue ".Values.api.image.repository") true }}'
+    busybox:
+      image: 'repl{{ ReplicatedImageName (HelmValue ".Values.busybox.image") true }}'
+```
+
+Per the air-gap onboarding docs: *"The `true` parameter sets `noProxy` to `true`, indicating 'the image reference value in values.yaml already contains the proxy path prefix.'"*
+
+**Behavior with `true` + custom-domain defaults:**
+- **Online (EC, KOTS, helm-CLI)** — value returned unchanged; custom domain preserved everywhere
+- **Airgap / BYO registry** — rewritten to `<LocalRegistryAddress>/<appSlug>/<name>:<tag>` automatically (the `isAirgap` branch runs before the `noProxy` check)
+
+**Without `true`** — EC alpha-31 unconditionally prepends the proxy prefix and you get DOUBLE prefixes like `images.example.com/proxy/my-app/images.example.com/proxy/my-app/...`. The "match configured ProxyDomain, return unchanged" shortcut only exists in later EC versions.
+
+**Exceptions — don't pass `true`:**
+- Upstream-form defaults (e.g. Traefik's `docker.io` / `traefik`). The function SHOULD prepend the proxy path in that case.
+
+### Replicated SDK special case
+
+The SDK image lives at `<proxy-domain>/library/replicated-sdk-image` — NOT under `/proxy/<app-slug>/library/...`. Wrapping it with `ReplicatedImageRepository` without `true` wrongly prepends `proxy/<slug>/` and pulls fail with `pull access denied`.
+
+**Correct wiring:**
+
+```yaml
+replicated:
+  image:
+    registry: 'repl{{ ReplicatedImageRegistry (HelmValue ".Values.replicated.image.registry") true }}'
+    repository: 'repl{{ ReplicatedImageRepository (HelmValue ".Values.replicated.image.repository") true }}'
+```
+
+The SDK's own pod does NOT need `imagePullSecrets` — `library/replicated-sdk-image` is a public path.
+
+## Advanced: subchart imagePullSecrets and dedup
+
+The `enterprise-pull-secret` pattern is load-bearing for EVERY pod in the rendered chart, including subchart pods. The main chart's `myapp.imagePullSecrets` helper only applies to deployments/jobs in the main chart, not subchart-owned pods.
+
+### Subchart pull secret wiring
+
+Default the subchart-specific pull-secret lists in `chart/values.yaml`:
+
+```yaml
+# chart/values.yaml
+imagePullSecrets:
+  - name: enterprise-pull-secret
+
+nats:
+  global:
+    image:
+      pullSecretNames:
+        - enterprise-pull-secret
+
+cloudnative-pg:
+  imagePullSecrets:
+    - name: enterprise-pull-secret
+```
+
+The CloudNativePG Cluster CR (which templates a StatefulSet outside of Helm) needs `imagePullSecrets` set explicitly on its spec:
+
+```yaml
+# chart/templates/postgres-cluster.yaml
+spec:
+  imagePullSecrets:
+    {{- include "myapp.imagePullSecrets" . | nindent 4 }}
+```
+
+### Dedup the helper
+
+If `.Values.imagePullSecrets` defaults to `[{name: enterprise-pull-secret}]` AND the helper also emits `enterprise-pull-secret` from the `global.replicated.dockerconfigjson` check, KOTS installs produce a warning:
+
+```
+spec.template.spec.imagePullSecrets[1].name: duplicate name "enterprise-pull-secret"
+```
+
+Build a dedup'd list in the helper:
+
+```yaml
+{{- define "myapp.imagePullSecrets" -}}
+{{- $names := list -}}
+{{- if and .Values.global .Values.global.replicated .Values.global.replicated.dockerconfigjson -}}
+{{- $names = append $names "enterprise-pull-secret" -}}
+{{- end -}}
+{{- range .Values.imagePullSecrets -}}
+{{- if not (has .name $names) -}}
+{{- $names = append $names .name -}}
+{{- end -}}
+{{- end -}}
+{{- range $names }}
+- name: {{ . }}
+{{- end }}
+{{- end }}
+```
+
 ## Verification
 
 Check all pods use the custom domain:
